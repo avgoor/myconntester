@@ -11,46 +11,82 @@ import (
 	"github.com/go-mysql-org/go-mysql/client"
 )
 
-func main() {
-	mHostName := flag.String("hostname", "127.0.0.1", "hostname/IP of MySQL server")
-	mPort := flag.String("port", "3306", "MySQL server port")
-	mDatabase := flag.String("database", "mysql", "MySQL database to connect")
-	mUsername := flag.String("username", "mysql", "MySQL username")
-	mPassword := flag.String("password", "", "MySQL password")
-	mCaPemFile := flag.String("ssl-ca", "", "SSL CA file")
-	mCertPemFile := flag.String("ssl-cert", "", "SSL certificate file")
-	mKeyPemFile := flag.String("ssl-key", "", "SSL certificate key file")
-	mInsecure := flag.Bool("insecure", false, "Skip SSL checks")
+type configOpt struct {
+	Hostname    string
+	Port        string
+	Database    string
+	Username    string
+	Password    string
+	CaPemFile   string
+	CertPemFile string
+	KeyPemFile  string
+	Insecure    bool
+	Concurrency int
+	Preload     int
+	TestCount   int
+}
 
+func main() {
+	var cfg configOpt
+
+	flag.StringVar(&cfg.Hostname, "H", "127.0.0.1", "hostname/IP of MySQL server")
+	flag.StringVar(&cfg.Port, "P", "3306", "MySQL server port")
+	flag.StringVar(&cfg.Database, "d", "mysql", "MySQL database to connect")
+	flag.StringVar(&cfg.Username, "u", "mysql", "MySQL username")
+	flag.StringVar(&cfg.Password, "p", "", "MySQL password")
+	flag.StringVar(&cfg.CaPemFile, "ssl-ca", "", "SSL CA file")
+	flag.StringVar(&cfg.CertPemFile, "ssl-cert", "", "SSL certificate file")
+	flag.StringVar(&cfg.KeyPemFile, "ssl-key", "", "SSL certificate key file")
+	flag.BoolVar(&cfg.Insecure, "i", false, "Skip SSL checks")
+	flag.IntVar(&cfg.Concurrency, "c", 10, "Concurrency")
+	flag.IntVar(&cfg.Preload, "l", 0, "Create n connections before real testing")
+	flag.IntVar(&cfg.TestCount, "t", 300, "Measure creation of n connections")
 	flag.Parse()
+
 	var tlsConfig *tls.Config
-	if *mCertPemFile != "" && *mKeyPemFile != "" && *mCaPemFile != "" {
-		mCaPem, err := ioutil.ReadFile(*mCaPemFile)
+
+	fmt.Println("Started with opts: ", cfg)
+
+	if cfg.CertPemFile != "" && cfg.KeyPemFile != "" && cfg.CaPemFile != "" {
+		mCaPem, err := ioutil.ReadFile(cfg.CaPemFile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		mCertPem, err := ioutil.ReadFile(*mCertPemFile)
+		mCertPem, err := ioutil.ReadFile(cfg.CertPemFile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		mKeyPem, err := ioutil.ReadFile(*mKeyPemFile)
+		mKeyPem, err := ioutil.ReadFile(cfg.KeyPemFile)
 		if err != nil {
 			log.Fatal(err)
 		}
 		tlsConfig = client.NewClientTLSConfig(mCaPem, mCertPem, mKeyPem,
-			*mInsecure, *mHostName)
+			cfg.Insecure, cfg.Hostname)
 	}
 
-	conn, err := client.Connect(strings.Join([]string{*mHostName, *mPort}, ":"),
-		*mUsername, *mPassword, *mDatabase, func(c *client.Conn) { c.SetTLSConfig(tlsConfig) })
-	if err != nil {
-		log.Fatal(err)
+	connector := func() *client.Conn {
+		conn, err := client.Connect(strings.Join([]string{cfg.Hostname, cfg.Port}, ":"),
+			cfg.Username, cfg.Password, cfg.Database, func(c *client.Conn) { c.SetTLSConfig(tlsConfig) })
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, err = conn.Execute("SELECT 1;")
+		if err != nil {
+			log.Fatal(err)
+		}
+		return conn
 	}
-	r, err := conn.Execute("SHOW STATUS;")
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, row := range r.Values {
-		fmt.Printf("%s:%s\n", row[0].AsString(), row[1].AsString())
+	if cfg.Preload > 0 {
+		var connections []*client.Conn
+		for i := 0; i < cfg.Preload; i++ {
+			connections = append(connections, connector())
+		}
+		defer func() {
+			for _, c := range connections {
+				c.Close()
+			}
+			fmt.Printf("Closed %d precreated connections.\n", len(connections))
+		}()
+		fmt.Println("Precreated: ", connections)
 	}
 }
