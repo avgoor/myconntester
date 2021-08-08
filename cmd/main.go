@@ -7,6 +7,9 @@ import (
 	"io/ioutil"
 	"log"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/client"
 )
@@ -44,7 +47,7 @@ func main() {
 	flag.Parse()
 
 	var tlsConfig *tls.Config
-
+	log.SetFlags(log.Lshortfile)
 	fmt.Println("Started with opts: ", cfg)
 
 	if cfg.CertPemFile != "" && cfg.KeyPemFile != "" && cfg.CaPemFile != "" {
@@ -64,6 +67,23 @@ func main() {
 			cfg.Insecure, cfg.Hostname)
 	}
 
+	// adjust fd limits
+	var rLim syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLim)
+	if err != nil {
+		log.Fatal(err)
+	}
+	needed := uint64(cfg.Preload + cfg.TestCount + 1024)
+	if rLim.Cur < needed {
+		fmt.Printf("Adjusting NOFILE limit from %d to %d\n", rLim.Cur, needed)
+		rLim.Cur = needed
+		rLim.Max = needed
+		err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLim)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	connector := func() *client.Conn {
 		conn, err := client.Connect(strings.Join([]string{cfg.Hostname, cfg.Port}, ":"),
 			cfg.Username, cfg.Password, cfg.Database, func(c *client.Conn) { c.SetTLSConfig(tlsConfig) })
@@ -77,16 +97,42 @@ func main() {
 		return conn
 	}
 	if cfg.Preload > 0 {
-		var connections []*client.Conn
+		fmt.Println("Precreating connections")
+		pConnections := make([]*client.Conn, cfg.Preload)
 		for i := 0; i < cfg.Preload; i++ {
-			connections = append(connections, connector())
+			pConnections[i] = connector()
 		}
 		defer func() {
-			for _, c := range connections {
+			for _, c := range pConnections {
 				c.Close()
 			}
-			fmt.Printf("Closed %d precreated connections.\n", len(connections))
+			fmt.Printf("Closed %d precreated connections.\n", len(pConnections))
 		}()
-		fmt.Println("Precreated: ", connections)
+		fmt.Printf("Precreated: %d connections\n", len(pConnections))
 	}
+	fmt.Println("Starting test")
+	var wg sync.WaitGroup
+	tConnections := make([]*client.Conn, cfg.TestCount)
+	bucket := make(chan struct{}, cfg.Concurrency)
+
+	startTime := time.Now()
+
+	for i := 0; i < cfg.TestCount; i++ {
+		bucket <- struct{}{}
+		wg.Add(1)
+		go func(c int) {
+			tConnections[c] = connector()
+			<-bucket
+			wg.Done()
+		}(i)
+	}
+	defer func() {
+		for _, c := range tConnections {
+			c.Close()
+		}
+		fmt.Printf("Closed %d connections.\n", len(tConnections))
+	}()
+	wg.Wait()
+	elapsedTime := time.Since(startTime)
+	fmt.Printf("%d connections with concurrency %d created in %v\n", cfg.TestCount, cfg.Concurrency, elapsedTime)
 }
