@@ -135,4 +135,5 @@ func main() {
 	wg.Wait()
 	elapsedTime := time.Since(startTime)
 	fmt.Printf("%d connections with concurrency %d created in %v\n", cfg.TestCount, cfg.Concurrency, elapsedTime)
+	fmt.Printf("1 connection took on average %v to establish\n", elapsedTime/time.Duration(cfg.TestCount))
 }
