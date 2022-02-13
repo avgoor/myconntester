@@ -90,7 +90,9 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		_, err = conn.Execute("SELECT 1;")
+		result, err := conn.Execute("SELECT 1;")
+		result.Close()
+
 		if err != nil {
 			log.Fatal(err)
 		}
